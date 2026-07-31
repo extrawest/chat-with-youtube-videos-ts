@@ -9,6 +9,12 @@ A fullstack RAG-powered application that enables users to input any YouTube vide
 
 ---
 
+## Video demostration
+
+https://github.com/user-attachments/assets/4b419ad1-a849-414f-9139-4d1945f3ecbf
+
+---
+
 ## 🌟 Key Features
 
 - **Universal YouTube Transcript Parsing**: Automatically fetches and chunks video transcripts for any public YouTube video link.
