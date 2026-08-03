@@ -1,4 +1,4 @@
-import { YoutubeTranscript } from "youtube-transcript";
+import { Supadata } from "@supadata/js";
 import { Document } from "@langchain/core/documents";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
@@ -13,12 +13,26 @@ export async function getYoutubeTranscriptDocs(
   videoId: string,
 ): Promise<Document[]> {
   try {
-    const rawTranscript = await YoutubeTranscript.fetchTranscript(videoId);
-    if (!rawTranscript?.length) {
+    const supadata = new Supadata({ apiKey: process.env.SUPADATA_API_KEY! });
+    const result = await supadata.youtube.transcript({ videoId });
+
+    if (!result?.content)
       throw new Error("No transcript available for this video.");
+
+    let fullText = "";
+    if (typeof result.content === "string") {
+      fullText = result.content;
+    } else if (Array.isArray(result.content)) {
+      fullText = result.content
+        .map((item: any) => (typeof item === "string" ? item : item.text || ""))
+        .filter(Boolean)
+        .join(" ");
     }
 
-    const fullText = rawTranscript.map((t) => t.text).join(" ");
+    if (!fullText || !fullText.trim()) {
+      throw new Error("Transcript content is empty.");
+    }
+
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 2000,
       chunkOverlap: 200,
