@@ -34,8 +34,8 @@ export async function getYoutubeTranscriptDocs(
     }
 
     const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 2000,
-      chunkOverlap: 200,
+      chunkSize: 600,
+      chunkOverlap: 150,
     });
 
     return await splitter.createDocuments([fullText], [{ videoId }]);
