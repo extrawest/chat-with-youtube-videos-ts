@@ -1,36 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  extractYoutubeVideoId,
-  getYoutubeTranscriptDocs,
-} from "@/app/lib/youtube";
-import { ingestTranscriptToVectorStore } from "@/app/lib/vectorstore";
+import { ingestGraph } from "@/app/lib/ingestGraph";
 import { graph } from "@/app/lib/graph";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
-    const { url } = await req.json();
+    const body = await req.json();
+    const { url } = body || {};
 
-    if (!url || typeof url !== "string") {
+    if (!url || typeof url !== "string" || !url.trim()) {
       return NextResponse.json(
         { error: "A valid YouTube URL string is required." },
         { status: 400 },
       );
     }
 
-    const videoId = extractYoutubeVideoId(url);
-    if (!videoId) {
+    const ingestResult = await ingestGraph.invoke({ url: url.trim() });
+
+    if (ingestResult.error) {
       return NextResponse.json(
-        { error: "Invalid YouTube video URL." },
+        { error: ingestResult.error },
         { status: 400 },
       );
     }
 
-    const docs = await getYoutubeTranscriptDocs(videoId);
-    await ingestTranscriptToVectorStore(videoId, docs);
-
+    const videoId = ingestResult.videoId;
     const threadId = `thread_${videoId}_${Date.now()}`;
+
     await graph.updateState(
       { configurable: { thread_id: threadId } },
       { videoId },
@@ -40,6 +37,7 @@ export async function POST(req: NextRequest) {
       success: true,
       videoId,
       threadId,
+      chunksCount: ingestResult.chunksCount,
     });
   } catch (error: any) {
     return NextResponse.json(
