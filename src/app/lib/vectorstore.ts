@@ -1,21 +1,51 @@
 import { GoogleGenerativeAIEmbeddings } from "@langchain/google-genai";
+import { TaskType } from "@google/generative-ai";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { Document } from "@langchain/core/documents";
 
-export function getEmbeddings(): GoogleGenerativeAIEmbeddings {
+export function getDocumentEmbeddings(): GoogleGenerativeAIEmbeddings {
   return new GoogleGenerativeAIEmbeddings({
     model: "gemini-embedding-001",
     apiKey: process.env.GEMINI_API_KEY,
+    taskType: TaskType.RETRIEVAL_DOCUMENT,
     maxConcurrency: 10,
   });
 }
 
-function getPineconeIndex() {
+export function getQueryEmbeddings(): GoogleGenerativeAIEmbeddings {
+  return new GoogleGenerativeAIEmbeddings({
+    model: "gemini-embedding-001",
+    apiKey: process.env.GEMINI_API_KEY,
+    taskType: TaskType.RETRIEVAL_QUERY,
+    maxConcurrency: 10,
+  });
+}
+
+export function getPineconeIndex() {
   const apiKey =
     process.env.PINECONE_API_KEY?.trim().replace(/^["']|["']$/g, "") || "";
   const indexName = process.env.PINECONE_INDEX_NAME || "youtube-transcripts";
   const pinecone = new Pinecone({ apiKey });
   return pinecone.Index(indexName);
+}
+
+export async function checkVideoIngested(videoId: string): Promise<boolean> {
+  try {
+    const embeddings = getQueryEmbeddings();
+    const probeVector = await embeddings.embedQuery("test probe");
+    const index = getPineconeIndex();
+
+    const checkRes = await index.query({
+      vector: probeVector,
+      topK: 1,
+      filter: { videoId: { $eq: videoId } },
+    });
+
+    return Boolean(checkRes.matches && checkRes.matches.length > 0);
+  } catch (err: any) {
+    console.warn(`[Pinecone Check Warning]: ${err.message || err}`);
+    return false;
+  }
 }
 
 export async function ingestTranscriptToVectorStore(
@@ -24,16 +54,11 @@ export async function ingestTranscriptToVectorStore(
 ) {
   if (!docs?.length) return;
 
-  const index = getPineconeIndex();
-
-  try {
-    const checkRes = await index.query({
-      vector: new Array(3072).fill(0.01),
-      topK: 1,
-      filter: { videoId: { $eq: videoId } },
-    });
-    if (checkRes.matches && checkRes.matches.length > 0) return;
-  } catch (err) {}
+  const alreadyIngested = await checkVideoIngested(videoId);
+  if (alreadyIngested) {
+    console.log(`Video ${videoId} transcript chunks already ingested.`);
+    return;
+  }
 
   const docsWithMetadata = docs
     .filter((doc) => doc.pageContent && doc.pageContent.trim().length > 0)
@@ -44,7 +69,7 @@ export async function ingestTranscriptToVectorStore(
 
   if (!docsWithMetadata.length) return;
 
-  const embeddings = getEmbeddings();
+  const embeddings = getDocumentEmbeddings();
   const vecs = await embeddings.embedDocuments(
     docsWithMetadata.map((d) => d.metadata.pageContent),
   );
@@ -61,7 +86,17 @@ export async function ingestTranscriptToVectorStore(
     metadata: doc.metadata,
   }));
 
-  await index.upsert({ records });
+  const index = getPineconeIndex();
+  const BATCH_SIZE = 100;
+
+  for (let i = 0; i < records.length; i += BATCH_SIZE) {
+    const batch = records.slice(i, i + BATCH_SIZE);
+    await index.upsert({ records: batch });
+  }
+
+  console.log(
+    `Ingested ${records.length} chunks into Pinecone in batches of ${BATCH_SIZE} for video ${videoId}.`,
+  );
 }
 
 export async function similaritySearchWithScore(
@@ -69,7 +104,7 @@ export async function similaritySearchWithScore(
   filterVideoId?: string,
   k = 4,
 ): Promise<[Document, number][]> {
-  const embeddings = getEmbeddings();
+  const embeddings = getQueryEmbeddings();
   const queryVec = await embeddings.embedQuery(query);
 
   const index = getPineconeIndex();
