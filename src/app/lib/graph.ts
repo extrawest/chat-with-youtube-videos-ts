@@ -8,6 +8,8 @@ import {
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { tavily } from "@tavily/core";
 import { BaseMessage, AIMessage } from "@langchain/core/messages";
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
 import { similaritySearchWithScore } from "./vectorstore";
 
 export const GraphState = Annotation.Root({
@@ -36,16 +38,53 @@ const tavilyClient = tavily({
   apiKey: process.env.TAVILY_API_KEY,
 });
 
-async function vectorSearchNode(state: typeof GraphState.State) {
+export const tavilySearchTool = tool(
+  async ({ query }: { query: string }) => {
+    const res = await tavilyClient.search(query, {
+      includeAnswer: true,
+      maxResults: 3,
+    });
+    return JSON.stringify(res);
+  },
+  {
+    name: "tavily_web_search",
+    description:
+      "Performs real-time web searches to answer queries when video transcript context is insufficient.",
+    schema: z.object({
+      query: z.string().describe("Search query string"),
+    }),
+  },
+);
+
+export function extractVideoIdFromThreadId(
+  threadId?: string,
+): string | undefined {
+  if (!threadId) return undefined;
+  const match = threadId.match(/^thread_([a-zA-Z0-9_-]{11})_\d+$/);
+  return match ? match[1] : undefined;
+}
+
+async function vectorSearchNode(
+  state: typeof GraphState.State,
+  config?: { configurable?: { thread_id?: string } },
+) {
   const lastMessage = state.messages[state.messages.length - 1];
+  if (!lastMessage) {
+    return { maxSimilarity: 0, contextDocs: [] };
+  }
+
   const query =
     typeof lastMessage.content === "string"
       ? lastMessage.content
       : JSON.stringify(lastMessage.content);
 
+  const effectiveVideoId =
+    state.videoId ||
+    extractVideoIdFromThreadId(config?.configurable?.thread_id);
+
   const searchResults = await similaritySearchWithScore(
     query,
-    state.videoId,
+    effectiveVideoId,
     4,
   );
 
@@ -62,6 +101,7 @@ async function vectorSearchNode(state: typeof GraphState.State) {
   }
 
   return {
+    videoId: effectiveVideoId || state.videoId,
     maxSimilarity: maxScore,
     contextDocs: docs,
   };
@@ -70,7 +110,7 @@ async function vectorSearchNode(state: typeof GraphState.State) {
 function routeByRelevance(
   state: typeof GraphState.State,
 ): "rag_generator" | "tavily_fallback" {
-  const similarityThreshold = 0.5;
+  const similarityThreshold = 0.75;
   return state.maxSimilarity >= similarityThreshold
     ? "rag_generator"
     : "tavily_fallback";
@@ -100,16 +140,14 @@ async function tavilyFallbackNode(state: typeof GraphState.State) {
       ? lastMessage.content
       : JSON.stringify(lastMessage.content);
 
-  const tavilyResponse = await tavilyClient.search(query, {
-    includeAnswer: true,
-    maxResults: 3,
-  });
+  const rawToolResult = await tavilySearchTool.invoke({ query });
+  const tavilyResponse = JSON.parse(rawToolResult);
 
   const directAnswer =
     tavilyResponse.answer || "No direct answer found from web search.";
-  const sourcesMarkdown = tavilyResponse.results
+  const sourcesMarkdown = (tavilyResponse.results || [])
     .slice(0, 3)
-    .map((r, i) => `${i + 1}. [${r.title}](${r.url})`)
+    .map((r: any, i: number) => `${i + 1}. [${r.title}](${r.url})`)
     .join("\n");
 
   const formattedResponse = `*Notice: Low video relevance (${(

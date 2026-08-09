@@ -1,21 +1,68 @@
 import { NextRequest, NextResponse } from "next/server";
 import { HumanMessage } from "@langchain/core/messages";
-import { graph } from "@/app/lib/graph";
+import { graph, extractVideoIdFromThreadId } from "@/app/lib/graph";
 
 export const dynamic = "force-dynamic";
+
+export async function GET(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const threadId = searchParams.get("threadId");
+
+    if (!threadId) {
+      return NextResponse.json(
+        { error: "Query parameter 'threadId' is required." },
+        { status: 400 },
+      );
+    }
+
+    const state = await graph.getState({
+      configurable: { thread_id: threadId },
+    });
+
+    const videoId = state.values?.videoId || extractVideoIdFromThreadId(threadId);
+
+    return NextResponse.json({
+      threadId,
+      videoId,
+      values: {
+        ...state.values,
+        videoId,
+      },
+      next: state.next,
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      { error: error.message || "Failed to retrieve graph state." },
+      { status: 500 },
+    );
+  }
+}
 
 export async function POST(req: NextRequest) {
   try {
     const { message, threadId } = await req.json();
 
-    if (!message || !threadId) {
+    if (!message || typeof message !== "string" || !message.trim()) {
       return NextResponse.json(
-        { error: "Both 'message' and 'threadId' parameters are required." },
+        { error: "A valid non-empty 'message' string is required." },
         { status: 400 },
       );
     }
 
-    const inputState = { messages: [new HumanMessage(message)] };
+    if (!threadId || typeof threadId !== "string" || !threadId.trim()) {
+      return NextResponse.json(
+        { error: "A valid 'threadId' string is required." },
+        { status: 400 },
+      );
+    }
+
+    const videoId = extractVideoIdFromThreadId(threadId);
+    const inputState = {
+      messages: [new HumanMessage(message)],
+      ...(videoId ? { videoId } : {}),
+    };
+
     const eventStream = graph.streamEvents(inputState, {
       configurable: { thread_id: threadId },
       version: "v2",
