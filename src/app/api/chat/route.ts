@@ -74,9 +74,11 @@ export async function POST(req: NextRequest) {
       async start(controller) {
         try {
           for await (const event of eventStream) {
+            const activeNode = event.metadata?.langgraph_node;
             if (
               event.event === "on_chat_model_stream" &&
-              event.data?.chunk?.content
+              event.data?.chunk?.content &&
+              (activeNode === "rag_generator" || activeNode === "video_summary")
             ) {
               controller.enqueue(encoder.encode(event.data.chunk.content));
             } else if (

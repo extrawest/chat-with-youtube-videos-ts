@@ -8,7 +8,7 @@ export function getDocumentEmbeddings(): GoogleGenerativeAIEmbeddings {
     model: "gemini-embedding-001",
     apiKey: process.env.GEMINI_API_KEY,
     taskType: TaskType.RETRIEVAL_DOCUMENT,
-    maxConcurrency: 10,
+    maxConcurrency: 5,
   });
 }
 
@@ -17,7 +17,7 @@ export function getQueryEmbeddings(): GoogleGenerativeAIEmbeddings {
     model: "gemini-embedding-001",
     apiKey: process.env.GEMINI_API_KEY,
     taskType: TaskType.RETRIEVAL_QUERY,
-    maxConcurrency: 10,
+    maxConcurrency: 5,
   });
 }
 
@@ -43,7 +43,6 @@ export async function checkVideoIngested(videoId: string): Promise<boolean> {
 
     return Boolean(checkRes.matches && checkRes.matches.length > 0);
   } catch (err: any) {
-    console.warn(`[Pinecone Check Warning]: ${err.message || err}`);
     return false;
   }
 }
@@ -51,6 +50,7 @@ export async function checkVideoIngested(videoId: string): Promise<boolean> {
 export async function ingestTranscriptToVectorStore(
   videoId: string,
   docs: Document[],
+  summaryText?: string,
 ) {
   if (!docs?.length) return;
 
@@ -64,20 +64,40 @@ export async function ingestTranscriptToVectorStore(
     .filter((doc) => doc.pageContent && doc.pageContent.trim().length > 0)
     .map((doc, idx) => ({
       id: `${videoId}_chunk_${idx}`,
-      metadata: { videoId, pageContent: doc.pageContent },
+      metadata: { videoId, pageContent: doc.pageContent, isSummary: false },
     }));
+
+  if (summaryText) {
+    docsWithMetadata.unshift({
+      id: `${videoId}_summary`,
+      metadata: { videoId, pageContent: summaryText, isSummary: true },
+    });
+  }
 
   if (!docsWithMetadata.length) return;
 
   const embeddings = getDocumentEmbeddings();
-  const vecs = await embeddings.embedDocuments(
-    docsWithMetadata.map((d) => d.metadata.pageContent),
-  );
+  const vecs: number[][] = [];
+  const EMBED_BATCH_SIZE = 20;
 
-  if (!vecs?.length || !vecs[0]?.length) {
-    throw new Error(
-      "Embedding generation returned empty vectors. Check GEMINI_API_KEY.",
-    );
+  for (let i = 0; i < docsWithMetadata.length; i += EMBED_BATCH_SIZE) {
+    const batchTexts = docsWithMetadata
+      .slice(i, i + EMBED_BATCH_SIZE)
+      .map((d) => d.metadata.pageContent);
+
+    const batchVecs = await embeddings.embedDocuments(batchTexts);
+
+    if (!batchVecs?.length || !batchVecs[0]?.length) {
+      throw new Error(
+        `Embedding generation returned empty vectors for batch starting at index ${i}. Check GEMINI_API_KEY or rate limits.`,
+      );
+    }
+
+    vecs.push(...batchVecs);
+
+    if (i + EMBED_BATCH_SIZE < docsWithMetadata.length) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
   }
 
   const records = docsWithMetadata.map((doc, i) => ({
@@ -99,6 +119,19 @@ export async function ingestTranscriptToVectorStore(
   );
 }
 
+export async function fetchVideoSummaryFromStore(
+  videoId: string,
+): Promise<string | null> {
+  try {
+    const index = getPineconeIndex();
+    const fetchRes = await index.fetch({ ids: [`${videoId}_summary`] });
+    const summaryRecord = fetchRes.records?.[`${videoId}_summary`];
+    return (summaryRecord?.metadata?.pageContent as string) || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function similaritySearchWithScore(
   query: string,
   filterVideoId?: string,
@@ -112,7 +145,9 @@ export async function similaritySearchWithScore(
     vector: queryVec,
     topK: k,
     includeMetadata: true,
-    filter: filterVideoId ? { videoId: { $eq: filterVideoId } } : undefined,
+    filter: filterVideoId
+      ? { videoId: { $eq: filterVideoId }, isSummary: { $ne: true } }
+      : undefined,
   });
 
   return (res.matches || []).map((m) => [

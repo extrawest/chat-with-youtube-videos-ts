@@ -10,7 +10,12 @@ import { tavily } from "@tavily/core";
 import { BaseMessage, AIMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import { similaritySearchWithScore } from "./vectorstore";
+import {
+  similaritySearchWithScore,
+  fetchVideoSummaryFromStore,
+} from "./vectorstore";
+
+export type UserIntent = "overview" | "specific_detail" | "off_topic";
 
 export const GraphState = Annotation.Root({
   messages: Annotation<BaseMessage[]>({
@@ -18,6 +23,11 @@ export const GraphState = Annotation.Root({
     default: () => [],
   }),
   videoId: Annotation<string>(),
+  intent: Annotation<UserIntent>({
+    reducer: (_, y) => y,
+    default: () => "specific_detail",
+  }),
+  videoSummary: Annotation<string>(),
   maxSimilarity: Annotation<number>({
     reducer: (_, y) => y,
     default: () => 0,
@@ -64,15 +74,11 @@ export function extractVideoIdFromThreadId(
   return match ? match[1] : undefined;
 }
 
-async function vectorSearchNode(
+async function intentClassifierNode(
   state: typeof GraphState.State,
   config?: { configurable?: { thread_id?: string } },
 ) {
   const lastMessage = state.messages[state.messages.length - 1];
-  if (!lastMessage) {
-    return { maxSimilarity: 0, contextDocs: [] };
-  }
-
   const query =
     typeof lastMessage.content === "string"
       ? lastMessage.content
@@ -82,9 +88,69 @@ async function vectorSearchNode(
     state.videoId ||
     extractVideoIdFromThreadId(config?.configurable?.thread_id);
 
+  let summary = state.videoSummary;
+  if (!summary && effectiveVideoId) {
+    summary = (await fetchVideoSummaryFromStore(effectiveVideoId)) || "";
+  }
+
+  const prompt = `Classify the user's question regarding a YouTube video.
+Video Summary: "${summary.substring(0, 300)}"
+
+Categories:
+1. "overview": Question asks for a summary, topic overview, main points, or who is speaking.
+2. "specific_detail": Question asks about specific facts, details, quotes, or numbers in the video.
+3. "off_topic": Question is completely unrelated to the video topic.
+
+Return ONLY ONE word (overview, specific_detail, or off_topic).
+
+Question: ${query}`;
+
+  try {
+    const res = await llm.invoke([{ role: "user", content: prompt }]);
+    const ans = (typeof res.content === "string" ? res.content : "")
+      .trim()
+      .toLowerCase();
+
+    let intent: UserIntent = "specific_detail";
+    if (ans.includes("overview")) intent = "overview";
+    else if (ans.includes("off_topic")) intent = "off_topic";
+
+    return { videoId: effectiveVideoId, videoSummary: summary, intent };
+  } catch {
+    return {
+      videoId: effectiveVideoId,
+      videoSummary: summary,
+      intent: "specific_detail" as UserIntent,
+    };
+  }
+}
+
+async function expandQuery(userQuery: string): Promise<string> {
+  if (userQuery.trim().split(/\s+/).length > 15) return userQuery;
+
+  try {
+    const prompt = `Expand the user question into key technical terms, topics, and vocabulary that would appear in a video transcript discussing this. Return ONLY expanded terms.
+Question: ${userQuery}`;
+
+    const res = await llm.invoke([{ role: "user", content: prompt }]);
+    const expanded = typeof res.content === "string" ? res.content : "";
+    return `${userQuery} ${expanded}`.trim();
+  } catch {
+    return userQuery;
+  }
+}
+
+async function vectorSearchNode(state: typeof GraphState.State) {
+  const lastMessage = state.messages[state.messages.length - 1];
+  const rawQuery =
+    typeof lastMessage.content === "string"
+      ? lastMessage.content
+      : JSON.stringify(lastMessage.content);
+
+  const expandedQuery = await expandQuery(rawQuery);
   const searchResults = await similaritySearchWithScore(
-    query,
-    effectiveVideoId,
+    expandedQuery,
+    state.videoId,
     4,
   );
 
@@ -101,19 +167,24 @@ async function vectorSearchNode(
   }
 
   return {
-    videoId: effectiveVideoId || state.videoId,
     maxSimilarity: maxScore,
     contextDocs: docs,
   };
 }
 
-function routeByRelevance(
-  state: typeof GraphState.State,
-): "rag_generator" | "tavily_fallback" {
-  const similarityThreshold = 0.75;
-  return state.maxSimilarity >= similarityThreshold
-    ? "rag_generator"
-    : "tavily_fallback";
+async function videoSummaryNode(state: typeof GraphState.State) {
+  const prompt = `You are an AI assistant analyzing a YouTube video.
+Answer the user's question using the high-level video summary below.
+
+Video Summary:
+${state.videoSummary || "No summary available."}`;
+
+  const response = await llm.invoke([
+    { role: "system", content: prompt },
+    ...state.messages,
+  ]);
+
+  return { messages: [response] };
 }
 
 async function ragGeneratorNode(state: typeof GraphState.State) {
@@ -159,9 +230,30 @@ async function tavilyFallbackNode(state: typeof GraphState.State) {
   return { messages: [new AIMessage(formattedResponse)] };
 }
 
+function routeByIntent(
+  state: typeof GraphState.State,
+): "video_summary" | "vector_search" | "tavily_fallback" {
+  if (state.intent === "overview") return "video_summary";
+  if (state.intent === "off_topic") return "tavily_fallback";
+  return "vector_search";
+}
+
+function routeByRelevance(
+  state: typeof GraphState.State,
+): "rag_generator" | "tavily_fallback" {
+  const similarityThreshold = 0.75;
+  return state.maxSimilarity >= similarityThreshold
+    ? "rag_generator"
+    : "tavily_fallback";
+}
+
 const workflow = new StateGraph(GraphState)
+  .addNode("intent_classifier", intentClassifierNode)
   .addNode("vector_search", vectorSearchNode, {
     retryPolicy: { maxAttempts: 3, backoffFactor: 2 },
+  })
+  .addNode("video_summary", videoSummaryNode, {
+    retryPolicy: { maxAttempts: 2, backoffFactor: 1.5 },
   })
   .addNode("rag_generator", ragGeneratorNode, {
     retryPolicy: { maxAttempts: 3, backoffFactor: 2 },
@@ -169,11 +261,17 @@ const workflow = new StateGraph(GraphState)
   .addNode("tavily_fallback", tavilyFallbackNode, {
     retryPolicy: { maxAttempts: 3, backoffFactor: 2 },
   })
-  .addEdge(START, "vector_search")
+  .addEdge(START, "intent_classifier")
+  .addConditionalEdges("intent_classifier", routeByIntent, {
+    video_summary: "video_summary",
+    vector_search: "vector_search",
+    tavily_fallback: "tavily_fallback",
+  })
   .addConditionalEdges("vector_search", routeByRelevance, {
     rag_generator: "rag_generator",
     tavily_fallback: "tavily_fallback",
   })
+  .addEdge("video_summary", END)
   .addEdge("rag_generator", END)
   .addEdge("tavily_fallback", END);
 
