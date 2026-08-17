@@ -31,17 +31,12 @@ export function getPineconeIndex() {
 
 export async function checkVideoIngested(videoId: string): Promise<boolean> {
   try {
-    const embeddings = getQueryEmbeddings();
-    const probeVector = await embeddings.embedQuery("test probe");
     const index = getPineconeIndex();
-
-    const checkRes = await index.query({
-      vector: probeVector,
-      topK: 1,
-      filter: { videoId: { $eq: videoId } },
-    });
-
-    return Boolean(checkRes.matches && checkRes.matches.length > 0);
+    const fetchRes = await index.fetch({ ids: [`${videoId}_summary`] });
+    if (fetchRes.records && fetchRes.records[`${videoId}_summary`]) {
+      return true;
+    }
+    return false;
   } catch (err: any) {
     return false;
   }

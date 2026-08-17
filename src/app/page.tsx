@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 
 interface Message {
@@ -20,6 +20,49 @@ export default function Home() {
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const savedThreadId = localStorage.getItem("yt_chat_thread_id");
+    const savedVideoId = localStorage.getItem("yt_chat_video_id");
+    if (savedThreadId) setThreadId(savedThreadId);
+    if (savedVideoId) setVideoId(savedVideoId);
+  }, []);
+
+  const fetchStateHistory = useCallback(async (activeThreadId: string) => {
+    try {
+      const res = await fetch(`/api/chat?threadId=${activeThreadId}`);
+      if (!res.ok) return;
+
+      const data = await res.json();
+      if (data.videoId) setVideoId(data.videoId);
+
+      if (data.values?.messages && Array.isArray(data.values.messages)) {
+        const parsedMsgs: Message[] = data.values.messages
+          .map((m: any) => {
+            const role =
+              m.id?.includes("HumanMessage") || m.type === "human"
+                ? "user"
+                : "assistant";
+            const content =
+              typeof m.content === "string"
+                ? m.content
+                : JSON.stringify(m.content);
+            return { role, content };
+          })
+          .filter((m: Message) => Boolean(m.content));
+
+        setMessages(parsedMsgs);
+      }
+    } catch (err) {
+      console.warn("Failed to fetch state history:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (threadId) {
+      fetchStateHistory(threadId);
+    }
+  }, [threadId, fetchStateHistory]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -45,6 +88,8 @@ export default function Home() {
 
       setVideoId(data.videoId);
       setThreadId(data.threadId);
+      localStorage.setItem("yt_chat_thread_id", data.threadId);
+      localStorage.setItem("yt_chat_video_id", data.videoId);
     } catch (err: any) {
       setIngestError(err.message || "An unexpected error occurred.");
     } finally {

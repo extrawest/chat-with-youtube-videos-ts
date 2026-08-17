@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { ingestGraph } from "@/app/lib/ingestGraph";
 import { graph } from "@/app/lib/graph";
+import { ensureCheckpointerSetup } from "@/app/lib/checkpointer";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   try {
+    await ensureCheckpointerSetup();
     const body = await req.json();
     const { url } = body || {};
 
@@ -19,19 +21,18 @@ export async function POST(req: NextRequest) {
     const ingestResult = await ingestGraph.invoke({ url: url.trim() });
 
     if (ingestResult.error) {
-      return NextResponse.json(
-        { error: ingestResult.error },
-        { status: 400 },
-      );
+      return NextResponse.json({ error: ingestResult.error }, { status: 400 });
     }
 
     const videoId = ingestResult.videoId;
     const threadId = `thread_${videoId}_${Date.now()}`;
 
-    await graph.updateState(
-      { configurable: { thread_id: threadId } },
-      { videoId },
-    );
+    if (videoId) {
+      await graph.updateState(
+        { configurable: { thread_id: threadId } },
+        { videoId, videoSummary: ingestResult.summary || "" },
+      );
+    }
 
     return NextResponse.json({
       success: true,
@@ -40,8 +41,11 @@ export async function POST(req: NextRequest) {
       chunksCount: ingestResult.chunksCount,
     });
   } catch (error: any) {
+    console.error("[API Ingest Error]:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to process YouTube video transcript." },
+      {
+        error: error.message || "Failed to process YouTube video transcript.",
+      },
       { status: 500 },
     );
   }

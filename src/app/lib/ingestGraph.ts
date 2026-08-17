@@ -1,11 +1,14 @@
 import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { extractYoutubeVideoId, getYoutubeTranscriptDocs } from "./youtube";
-import { ingestTranscriptToVectorStore, checkVideoIngested } from "./vectorstore";
+import {
+  ingestTranscriptToVectorStore,
+  checkVideoIngested,
+} from "./vectorstore";
 import { Document } from "@langchain/core/documents";
 
 const llm = new ChatGoogleGenerativeAI({
-  model: "gemini-3.6-flash",
+  model: "gemini-3.7-flash",
   apiKey: process.env.GEMINI_API_KEY,
 });
 
@@ -17,7 +20,10 @@ export const IngestGraphState = Annotation.Root({
   docs: Annotation<Document[]>({ reducer: (_, y) => y, default: () => [] }),
   chunksCount: Annotation<number>({ reducer: (_, y) => y, default: () => 0 }),
   status: Annotation<string>({ reducer: (_, y) => y, default: () => "idle" }),
-  error: Annotation<string | null>({ reducer: (_, y) => y, default: () => null }),
+  error: Annotation<string | null>({
+    reducer: (_, y) => y,
+    default: () => null,
+  }),
 });
 
 async function extractVideoIdNode(state: typeof IngestGraphState.State) {
@@ -59,7 +65,10 @@ ${state.fullText.substring(0, 8000)}`;
 
   try {
     const res = await llm.invoke([{ role: "user", content: prompt }]);
-    const summary = typeof res.content === "string" ? res.content : JSON.stringify(res.content);
+    const summary =
+      typeof res.content === "string"
+        ? res.content
+        : JSON.stringify(res.content);
     return { summary, status: "generated_summary" };
   } catch {
     return { summary: "", status: "failed_summary" };

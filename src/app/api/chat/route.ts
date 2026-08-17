@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { HumanMessage } from "@langchain/core/messages";
-import { graph, extractVideoIdFromThreadId } from "@/app/lib/graph";
+import { graph } from "@/app/lib/graph";
+import { ensureCheckpointerSetup } from "@/app/lib/checkpointer";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   try {
+    await ensureCheckpointerSetup();
     const { searchParams } = new URL(req.url);
     const threadId = searchParams.get("threadId");
 
@@ -20,7 +22,7 @@ export async function GET(req: NextRequest) {
       configurable: { thread_id: threadId },
     });
 
-    const videoId = state.values?.videoId || extractVideoIdFromThreadId(threadId);
+    const videoId = state.values?.videoId || null;
 
     return NextResponse.json({
       threadId,
@@ -41,6 +43,7 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
+    await ensureCheckpointerSetup();
     const { message, threadId } = await req.json();
 
     if (!message || typeof message !== "string" || !message.trim()) {
@@ -57,10 +60,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const videoId = extractVideoIdFromThreadId(threadId);
     const inputState = {
       messages: [new HumanMessage(message)],
-      ...(videoId ? { videoId } : {}),
     };
 
     const eventStream = graph.streamEvents(inputState, {
@@ -74,20 +75,21 @@ export async function POST(req: NextRequest) {
       async start(controller) {
         try {
           for await (const event of eventStream) {
-            const activeNode = event.metadata?.langgraph_node;
             if (
               event.event === "on_chat_model_stream" &&
-              event.data?.chunk?.content &&
-              (activeNode === "rag_generator" || activeNode === "video_summary")
+              event.data?.chunk?.content
             ) {
-              controller.enqueue(encoder.encode(event.data.chunk.content));
+              controller.enqueue(
+                encoder.encode(String(event.data.chunk.content)),
+              );
             } else if (
               event.event === "on_chain_end" &&
-              event.name === "tavily_fallback" &&
-              event.data?.output?.messages
+              event.name === "tavily_fallback"
             ) {
-              const lastMsg = event.data.output.messages[0]?.content;
-              if (lastMsg) controller.enqueue(encoder.encode(lastMsg));
+              const fallbackText = event.data?.output?.messages?.[0]?.content;
+              if (fallbackText) {
+                controller.enqueue(encoder.encode(String(fallbackText)));
+              }
             }
           }
         } catch (err: any) {

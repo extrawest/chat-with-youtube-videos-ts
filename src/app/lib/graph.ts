@@ -1,11 +1,6 @@
-import {
-  Annotation,
-  StateGraph,
-  START,
-  END,
-  MemorySaver,
-} from "@langchain/langgraph";
+import { Annotation, StateGraph, START, END } from "@langchain/langgraph";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { tavily } from "@tavily/core";
 import { BaseMessage, AIMessage } from "@langchain/core/messages";
 import { tool } from "@langchain/core/tools";
@@ -14,6 +9,7 @@ import {
   similaritySearchWithScore,
   fetchVideoSummaryFromStore,
 } from "./vectorstore";
+import { checkpointer } from "./checkpointer";
 
 export type UserIntent = "overview" | "specific_detail" | "off_topic";
 
@@ -39,9 +35,14 @@ export const GraphState = Annotation.Root({
 });
 
 const llm = new ChatGoogleGenerativeAI({
-  model: "gemini-3.6-flash",
+  model: "gemini-3.7-flash",
   apiKey: process.env.GEMINI_API_KEY,
   streaming: true,
+});
+
+const googleAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
+const classifierModel = googleAI.getGenerativeModel({
+  model: "gemini-3.7-flash",
 });
 
 const tavilyClient = tavily({
@@ -66,31 +67,16 @@ export const tavilySearchTool = tool(
   },
 );
 
-export function extractVideoIdFromThreadId(
-  threadId?: string,
-): string | undefined {
-  if (!threadId) return undefined;
-  const match = threadId.match(/^thread_([a-zA-Z0-9_-]{11})_\d+$/);
-  return match ? match[1] : undefined;
-}
-
-async function intentClassifierNode(
-  state: typeof GraphState.State,
-  config?: { configurable?: { thread_id?: string } },
-) {
+async function intentClassifierNode(state: typeof GraphState.State) {
   const lastMessage = state.messages[state.messages.length - 1];
   const query =
     typeof lastMessage.content === "string"
       ? lastMessage.content
       : JSON.stringify(lastMessage.content);
 
-  const effectiveVideoId =
-    state.videoId ||
-    extractVideoIdFromThreadId(config?.configurable?.thread_id);
-
   let summary = state.videoSummary;
-  if (!summary && effectiveVideoId) {
-    summary = (await fetchVideoSummaryFromStore(effectiveVideoId)) || "";
+  if (!summary && state.videoId) {
+    summary = (await fetchVideoSummaryFromStore(state.videoId)) || "";
   }
 
   const prompt = `Classify the user's question regarding a YouTube video.
@@ -106,37 +92,22 @@ Return ONLY ONE word (overview, specific_detail, or off_topic).
 Question: ${query}`;
 
   try {
-    const res = await llm.invoke([{ role: "user", content: prompt }]);
-    const ans = (typeof res.content === "string" ? res.content : "")
-      .trim()
-      .toLowerCase();
+    const result = await classifierModel.generateContent(prompt);
+    const ans = result.response.text().trim().toLowerCase();
 
     let intent: UserIntent = "specific_detail";
     if (ans.includes("overview")) intent = "overview";
     else if (ans.includes("off_topic")) intent = "off_topic";
 
-    return { videoId: effectiveVideoId, videoSummary: summary, intent };
-  } catch {
+    console.log(`[Intent Classifier]: Identified "${intent}" for question: "${query.substring(0, 60)}"`);
+    return { videoId: state.videoId, videoSummary: summary, intent };
+  } catch (err: any) {
+    console.warn(`[Intent Classifier Warning]: ${err.message || err}. Defaulting to specific_detail.`);
     return {
-      videoId: effectiveVideoId,
+      videoId: state.videoId,
       videoSummary: summary,
       intent: "specific_detail" as UserIntent,
     };
-  }
-}
-
-async function expandQuery(userQuery: string): Promise<string> {
-  if (userQuery.trim().split(/\s+/).length > 15) return userQuery;
-
-  try {
-    const prompt = `Expand the user question into key technical terms, topics, and vocabulary that would appear in a video transcript discussing this. Return ONLY expanded terms.
-Question: ${userQuery}`;
-
-    const res = await llm.invoke([{ role: "user", content: prompt }]);
-    const expanded = typeof res.content === "string" ? res.content : "";
-    return `${userQuery} ${expanded}`.trim();
-  } catch {
-    return userQuery;
   }
 }
 
@@ -147,9 +118,8 @@ async function vectorSearchNode(state: typeof GraphState.State) {
       ? lastMessage.content
       : JSON.stringify(lastMessage.content);
 
-  const expandedQuery = await expandQuery(rawQuery);
   const searchResults = await similaritySearchWithScore(
-    expandedQuery,
+    rawQuery,
     state.videoId,
     4,
   );
@@ -274,8 +244,6 @@ const workflow = new StateGraph(GraphState)
   .addEdge("video_summary", END)
   .addEdge("rag_generator", END)
   .addEdge("tavily_fallback", END);
-
-export const checkpointer = new MemorySaver();
 
 export const graph = workflow.compile({
   checkpointer,
