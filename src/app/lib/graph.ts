@@ -35,14 +35,14 @@ export const GraphState = Annotation.Root({
 });
 
 const llm = new ChatGoogleGenerativeAI({
-  model: "gemini-3.7-flash",
+  model: "gemini-3.6-flash",
   apiKey: process.env.GEMINI_API_KEY,
   streaming: true,
 });
 
 const googleAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const classifierModel = googleAI.getGenerativeModel({
-  model: "gemini-3.7-flash",
+  model: "gemini-3.6-flash",
 });
 
 const tavilyClient = tavily({
@@ -99,10 +99,14 @@ Question: ${query}`;
     if (ans.includes("overview")) intent = "overview";
     else if (ans.includes("off_topic")) intent = "off_topic";
 
-    console.log(`[Intent Classifier]: Identified "${intent}" for question: "${query.substring(0, 60)}"`);
+    console.log(
+      `[Intent Classifier]: Identified "${intent}" for question: "${query.substring(0, 60)}"`,
+    );
     return { videoId: state.videoId, videoSummary: summary, intent };
   } catch (err: any) {
-    console.warn(`[Intent Classifier Warning]: ${err.message || err}. Defaulting to specific_detail.`);
+    console.warn(
+      `[Intent Classifier Warning]: ${err.message || err}. Defaulting to specific_detail.`,
+    );
     return {
       videoId: state.videoId,
       videoSummary: summary,
